@@ -1,0 +1,78 @@
+{
+  "session_info": {
+    "session_id": null,
+    "recovery_mode": false,
+    "start_time": "2025-07-05T06:15:38.828054+00:00",
+    "elapsed_time": "0:00:00.043481",
+    "estimated_completion": null
+  },
+  "progress": {
+    "overall_percentage": 0.0,
+    "current_phase": "initialization",
+    "phase_percentage": 0.0,
+    "completed_phases": 0,
+    "total_phases": 10
+  },
+  "extraction": {
+    "posts_extracted": 15,
+    "posts_estimate": null,
+    "extraction_rate": 22838.14,
+    "extraction_rate_per_second": 380.636,
+    "smoothed_extraction_rate": 36499.2,
+    "scroll_position": 0,
+    "scroll_target": null
+  },
+  "performance": {
+    "bytes_processed": 0,
+    "network_requests": 0,
+    "error_count": 0,
+    "warning_count": 0,
+    "retry_count": 0
+  },
+  "time_estimates": {
+    "estimated_remaining": null,
+    "estimated_completion": null,
+    "conservative_remaining": null,
+    "optimistic_remaining": null
+  },
+  "phase_metrics": {
+    "current_phase_rate": 0.0,
+    "average_phase_rate": 0.0,
+    "phase_elapsed_time": "0:00:00",
+    "phase_estimated_remaining": null,
+    "average_phase_duration": null
+  },
+  "rate_summary": {
+    "extraction_rates": {
+      "per_second": 380.636,
+      "per_minute": 22838.14,
+      "smoothed_per_minute": 36499.2
+    },
+    "phase_rates": {
+      "current_phase": 0.0,
+      "average_across_phases": 0.0
+    },
+    "rate_calculators": {
+      "posts_measurements": 4,
+      "bytes_measurements": 4,
+      "overall_measurements": 4
+    }
+  },
+  "timing_summary": {
+    "overall_timing": {
+      "elapsed": "0:00:00.043481",
+      "estimated_remaining": null,
+      "estimated_completion": null
+    },
+    "enhanced_estimates": {
+      "conservative_remaining": null,
+      "optimistic_remaining": null
+    },
+    "phase_timing": {
+      "current_phase_elapsed": "0:00:00",
+      "phase_estimated_remaining": null,
+      "average_phase_duration": null
+    },
+    "phase_history": []
+  }
+}

@@ -25,6 +25,12 @@ try:
     from .markdown_generator import MarkdownGenerator, generate_markdown_from_posts
     from .scroll_automator import ScrollAutomator, create_scroll_automator
     
+    # Progress tracking
+    from .progress_tracker import (
+        ProgressTracker, ProgressPhase, ProgressStats, ProgressCallback,
+        create_progress_tracker, create_console_callback
+    )
+    
     # Error handling
     from .exceptions import (
         LinkedInExtractorError, NetworkError, AuthenticationError,
@@ -59,6 +65,10 @@ try:
         "ContentParser", "parse_linkedin_profile",
         "MarkdownGenerator", "generate_markdown_from_posts",
         "ScrollAutomator", "create_scroll_automator",
+        
+        # Progress tracking
+        "ProgressTracker", "ProgressPhase", "ProgressStats", "ProgressCallback",
+        "create_progress_tracker", "create_console_callback",
         
         # Error handling
         "LinkedInExtractorError", "NetworkError", "AuthenticationError",
