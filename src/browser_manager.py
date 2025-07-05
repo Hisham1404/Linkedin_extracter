@@ -9,6 +9,8 @@ provides methods for navigation and element interaction.
 import os
 import time
 import random
+import json
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options as ChromeOptions
@@ -31,6 +33,7 @@ from config import (
     USER_AGENTS,
     ERROR_MESSAGES
 )
+from stealth_manager import create_stealth_manager
 
 logger = logging.getLogger(__name__)
 
@@ -43,18 +46,21 @@ class WebDriverManager:
     and element interaction with robust error handling and retry logic.
     """
     
-    def __init__(self, headless: bool = True, user_agent: Optional[str] = None):
+    def __init__(self, headless: bool = True, user_agent: Optional[str] = None, use_proxy: bool = False, proxy_list: Optional[List[str]] = None):
         """
         Initialize WebDriver Manager.
         
         Args:
             headless: Whether to run browser in headless mode
             user_agent: Custom user agent string (random if None)
+            use_proxy: Whether to use proxy rotation
+            proxy_list: List of proxy servers
         """
         self.headless = headless
         self.user_agent = user_agent or self._get_random_user_agent()
         self.driver: Optional[webdriver.Chrome] = None
         self.wait: Optional[WebDriverWait] = None
+        self.stealth_manager = create_stealth_manager(use_proxy, proxy_list)
         self._setup_logging()
         
     def _setup_logging(self):
@@ -95,11 +101,19 @@ class WebDriverManager:
         options.add_argument("--disable-extensions")
         options.add_argument("--disable-plugins")
         options.add_argument("--disable-images")  # Faster loading
-        options.add_argument("--disable-javascript")  # May need to be removed for dynamic content
         options.add_argument("--disable-notifications")
         options.add_argument("--disable-popup-blocking")
         options.add_argument("--disable-translate")
         options.add_argument("--disable-features=TranslateUI")
+        
+        # Anti-detection options
+        options.add_argument("--disable-blink-features=AutomationControlled")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--disable-web-security")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--disable-ipc-flooding-protection")
+        options.add_experimental_option("excludeSwitches", ["enable-automation"])
+        options.add_experimental_option('useAutomationExtension', False)
         
         # Window size
         options.add_argument("--window-size=1920,1080")
@@ -146,6 +160,9 @@ class WebDriverManager:
                 service = ChromeService(executable_path=chrome_driver_path)
                 options = self._create_chrome_options()
                 
+                # Configure proxy if available
+                options = self.stealth_manager.configure_proxy_for_selenium(options)
+                
                 # Initialize driver
                 self.driver = webdriver.Chrome(service=service, options=options)
                 
@@ -156,8 +173,8 @@ class WebDriverManager:
                 # Initialize WebDriverWait
                 self.wait = WebDriverWait(self.driver, TIMEOUTS["explicit_wait"])
                 
-                # Stealth: Execute script to hide webdriver property
-                self.driver.execute_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+                # Execute stealth scripts to hide automation
+                self._execute_stealth_scripts()
                 
                 logger.info("Chrome WebDriver initialized successfully")
                 return True
@@ -196,6 +213,10 @@ class WebDriverManager:
             
         try:
             logger.info(f"Navigating to: {url}")
+            
+            # Apply stealth delay before navigation
+            self.stealth_manager.wait_random_delay(2, 5)
+            
             self.driver.get(url)
             
             if wait_for_load and self.wait:
@@ -233,6 +254,10 @@ class WebDriverManager:
             else:
                 wait = self.wait
             
+            if not wait:
+                logger.error("WebDriverWait not initialized")
+                return None
+                
             element = wait.until(EC.presence_of_element_located(locator))
             logger.debug(f"Element found: {locator}")
             return element
@@ -265,6 +290,10 @@ class WebDriverManager:
             else:
                 wait = self.wait
             
+            if not wait:
+                logger.error("WebDriverWait not initialized")
+                return []
+                
             elements = wait.until(EC.presence_of_all_elements_located(locator))
             logger.debug(f"Found {len(elements)} elements: {locator}")
             return elements
@@ -405,3 +434,70 @@ class WebDriverManager:
         except Exception as e:
             logger.error(f"Error getting current URL: {e}")
             return None
+        
+    def _execute_stealth_scripts(self):
+        """
+        Execute JavaScript to hide automation indicators and make browser appear more human-like.
+        """
+        if not self.driver:
+            logger.warning("Driver not initialized, skipping stealth scripts")
+            return
+            
+        try:
+            # Execute stealth JavaScript code
+            stealth_code = self.stealth_manager.get_javascript_stealth_code()
+            self.driver.execute_script(stealth_code)
+            
+            logger.debug("Stealth scripts executed successfully")
+            
+        except Exception as e:
+            logger.warning(f"Failed to execute stealth scripts: {e}")
+
+    def load_cookies(self, cookie_path: Path) -> None:
+        """Load cookies from a file into the current browser session."""
+        if not self.driver:
+            logger.error("WebDriver not initialized, cannot load cookies.")
+            return
+
+        if not cookie_path.exists():
+            logger.warning(f"Cookie file not found at {cookie_path}, skipping.")
+            return
+
+        try:
+            with open(cookie_path, 'r') as f:
+                cookies = json.load(f)
+            
+            # For loading cookies, we must first be on the domain.
+            # We navigate to the base domain before adding the cookies.
+            self.driver.get("https://www.linkedin.com/")
+            # Clear any cookies first to avoid conflicts
+            self.driver.delete_all_cookies()
+            
+            accepted_keys = {"name", "value", "domain", "path", "expiry", "httpOnly", "secure", "sameSite"}
+            success_count = 0
+            for cookie in cookies:
+                try:
+                    # Keep only accepted keys
+                    sanitized = {k: v for k, v in cookie.items() if k in accepted_keys}
+                    
+                    # Remove attributes that often break Selenium
+                    sanitized.pop("sameSite", None)  # Selenium 4.21 still dislikes some sameSite values
+                    # Remove expiry if not int
+                    if isinstance(sanitized.get("expiry"), str):
+                        sanitized.pop("expiry")
+                    
+                    self.driver.add_cookie(sanitized)
+                    success_count += 1
+                except Exception as cookie_err:
+                    logger.debug(f"Skipping cookie {cookie.get('name')} due to error: {cookie_err}")
+            
+            logger.info(f"Successfully loaded {success_count}/{len(cookies)} cookies for linkedin.com.")
+
+        except json.JSONDecodeError as jde:
+            logger.error(f"Cookie file is not valid JSON: {jde}")
+        except Exception as e:
+            logger.error(f"An error occurred while loading cookies: {e!r}")
+
+    def get_driver(self) -> webdriver.Chrome:
+        """Return the managed WebDriver instance."""
+        return self.driver

@@ -13,12 +13,15 @@ import requests
 from typing import Optional, Tuple, List
 from urllib.parse import urlparse, urlunparse
 import logging
+import time
+import random
 
 from config import (
     LINKEDIN_URL_REGEX, 
     LINKEDIN_DOMAINS, 
     ERROR_MESSAGES,
-    TIMEOUTS
+    TIMEOUTS,
+    ANTI_BOT_CONFIG
 )
 
 logger = logging.getLogger(__name__)
@@ -133,15 +136,45 @@ class LinkedInURLValidator:
             Tuple of (is_accessible, error_message)
         """
         try:
-            # Use HEAD request to avoid downloading full page
-            response = requests.head(
+            # Add random delay to avoid detection
+            delay = random.uniform(2, 5)
+            logger.debug(f"Waiting {delay:.2f} seconds before URL check")
+            time.sleep(delay)
+            
+            # Create a session with more sophisticated headers
+            session = requests.Session()
+            
+            # Enhanced headers to mimic real browser behavior
+            headers = {
+                'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+                'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                'Accept-Language': 'en-US,en;q=0.9',
+                'Accept-Encoding': 'gzip, deflate, br',
+                'Connection': 'keep-alive',
+                'Upgrade-Insecure-Requests': '1',
+                'Sec-Fetch-Dest': 'document',
+                'Sec-Fetch-Mode': 'navigate',
+                'Sec-Fetch-Site': 'none',
+                'Cache-Control': 'max-age=0',
+                'DNT': '1',
+                'Sec-Ch-Ua': '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+                'Sec-Ch-Ua-Mobile': '?0',
+                'Sec-Ch-Ua-Platform': '"Windows"'
+            }
+            
+            session.headers.update(headers)
+            
+            # Use GET request instead of HEAD to avoid some anti-bot detection
+            response = session.get(
                 url,
                 timeout=TIMEOUTS["network_timeout"],
                 allow_redirects=True,
-                headers={
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36'
-                }
+                stream=True  # Don't download full content
             )
+            
+            # Only read first few bytes to check if accessible
+            content_preview = response.raw.read(1024)
+            response.close()
             
             if response.status_code == 200:
                 logger.debug(f"URL accessible: {url}")
@@ -150,6 +183,9 @@ class LinkedInURLValidator:
                 return False, ERROR_MESSAGES["profile_not_found"]
             elif response.status_code == 403:
                 return False, "Profile access denied or private profile"
+            elif response.status_code == 999:
+                logger.warning(f"LinkedIn anti-bot protection detected (HTTP 999) for {url}")
+                return False, "LinkedIn anti-bot protection detected. Try using --skip-validation flag."
             else:
                 return False, f"HTTP {response.status_code}: Unable to access profile"
                 

@@ -114,6 +114,42 @@ class LinkedInContentParser:
             
             logger.info(f"Found {len(post_containers)} potential post containers")
             
+            # Debug: Log some HTML structure information
+            if len(post_containers) == 0:
+                logger.warning("No post containers found. Analyzing page structure...")
+                
+                # Check for common LinkedIn elements to verify we're on a profile page
+                profile_indicators = [
+                    'div[data-section="summary"]',
+                    'section[data-section="summary"]',
+                    '.pv-top-card',
+                    '.pv-profile-section',
+                    '[data-section="experience"]',
+                    '.feed-container',
+                    '.scaffold-layout__main'
+                ]
+                
+                for indicator in profile_indicators:
+                    elements = soup.select(indicator)
+                    if elements:
+                        logger.debug(f"Found {len(elements)} elements with selector: {indicator}")
+                    
+                # Check if page content suggests login is required
+                page_text = soup.get_text().lower()
+                if any(phrase in page_text for phrase in ['sign in', 'join linkedin', 'login', 'register']):
+                    logger.warning("Page content suggests login may be required")
+                    
+                # Log some general page structure
+                main_content = soup.find('main') or soup.find('body')
+                if main_content and hasattr(main_content, 'find_all'):
+                    divs = main_content.find_all('div', limit=20)
+                    logger.debug(f"Found {len(divs)} div elements in main content area")
+                    
+                    # Look for any data-id attributes (common in LinkedIn posts)
+                    data_id_elements = main_content.find_all(attrs={'data-id': True})
+                    if data_id_elements:
+                        logger.debug(f"Found {len(data_id_elements)} elements with data-id attributes")
+            
             for i, container in enumerate(post_containers):
                 try:
                     post_data = self._parse_post_container(container)

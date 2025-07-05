@@ -10,6 +10,12 @@ the overall application flow.
 import sys
 import argparse
 from pathlib import Path
+import time
+from typing import Optional, List, Dict, Any
+from selenium.webdriver.common.by import By
+from selenium.webdriver.common.keys import Keys
+from selenium.webdriver.support.ui import WebDriverWait
+from selenium.webdriver.support import expected_conditions as EC
 
 # Add src and config directories to path for imports
 project_root = Path(__file__).parent
@@ -80,6 +86,21 @@ def main():
         action="store_true",
         help="Disable infinite scroll automation (extract current page only)"
     )
+    parser.add_argument(
+        "--skip-validation",
+        action="store_true",
+        help="Skip URL accessibility check (useful when LinkedIn blocks validation requests)"
+    )
+    parser.add_argument(
+        "--cookies",
+        help="Path to a cookies.json file to use for authentication",
+        default=None
+    )
+    parser.add_argument(
+        "--headful",
+        action="store_true",
+        help="Run the browser in headful mode (visible) for debugging",
+    )
     
     args = parser.parse_args()
     
@@ -106,7 +127,7 @@ def main():
         try:
             is_valid, normalized_url, validation_error = validate_linkedin_url(
                 args.profile_url, 
-                check_accessibility=True
+                check_accessibility=not args.skip_validation
             )
             
             if not is_valid:
@@ -152,8 +173,8 @@ def main():
         print("🌐 Starting web browser...")
         
         try:
-            with WebDriverManager(headless=True) as driver_manager:
-                # Step 3: Navigate to LinkedIn profile
+            with WebDriverManager(headless=not args.headful) as driver_manager:
+                # Step 3: Navigate to LinkedIn profile with robust waiting
                 logger.info(f"Navigating to LinkedIn profile: {normalized_url}")
                 print("📖 Loading LinkedIn profile...")
                 
@@ -162,6 +183,43 @@ def main():
                     print("❌ Failed to load LinkedIn profile")
                     return 1
                 
+                # CRITICAL FIX: Wait for the profile page to fully load before proceeding
+                try:
+                    logger.info("Waiting for profile page to load...")
+                    # Wait for key LinkedIn profile elements to appear
+                    profile_indicators = [
+                        ".pv-top-card",  # Main profile card
+                        ".scaffold-layout__main",  # Main content area
+                        "main",  # HTML5 main element
+                        "body"  # Fallback to body
+                    ]
+                    
+                    element_found = False
+                    for indicator in profile_indicators:
+                        try:
+                            WebDriverWait(driver_manager.driver, 20).until(
+                                EC.presence_of_element_located((By.CSS_SELECTOR, indicator))
+                            )
+                            logger.info(f"Profile page loaded (found: {indicator})")
+                            element_found = True
+                            break
+                        except:
+                            continue
+                    
+                    if not element_found:
+                        logger.warning("Could not find expected profile elements, proceeding anyway")
+                        
+                except Exception as wait_error:
+                    logger.error(f"Error waiting for profile page: {wait_error}")
+                    try:
+                        # Save screenshot for debugging
+                        driver_manager.driver.save_screenshot('debug_screenshot.png')
+                        logger.info("Debug screenshot saved as debug_screenshot.png")
+                        print("📸 Screenshot saved as debug_screenshot.png for debugging")
+                    except:
+                        pass
+                    print("⚠️  Profile page may not have loaded completely, proceeding anyway...")
+
                 # Step 4: Perform infinite scroll to load all content
                 if not args.disable_scroll:
                     logger.info("Performing infinite scroll to load all posts...")
@@ -199,78 +257,84 @@ def main():
                                 print(f"   Error: {scroll_result.get('error', 'Unknown error')}")
                     
                     except Exception as scroll_error:
-                        logger.warning(f"Scroll automation error: {scroll_error}")
+                        logger.warning(f"Scroll automation failed: {scroll_error}")
                         print("⚠️  Scroll automation failed, proceeding with current page content")
                         if args.verbose:
                             print(f"   Error: {scroll_error}")
-                
-                # Step 5: Extract page content
+
+                # Step 5: Extract page content and parse posts
                 logger.info("Extracting page content...")
                 print("🔍 Analyzing page content...")
                 
-                page_source = driver_manager.get_page_source()
-                if not page_source:
-                    logger.error("Failed to extract page source")
-                    print("❌ Failed to extract page content")
-                    return 1
-                
-                # Step 6: Parse content and extract posts
-                logger.info("Parsing LinkedIn posts...")
-                print("📝 Extracting posts...")
-                
-                posts = parse_linkedin_profile(page_source)
-                
-                if not posts:
-                    logger.warning("No posts found on the profile")
-                    print("⚠️  No posts found on this LinkedIn profile")
-                    print("   This could be due to:")
-                    print("   • The profile has no public posts")
-                    print("   • The profile requires login to view posts")
-                    print("   • LinkedIn's structure has changed")
-                    return 0
-                
-                # Step 6: Generate summary
-                summary = extract_post_summary(posts)
-                logger.info(f"Extracted {summary['total_posts']} posts")
-                
-                # Display results
-                print(f"\n🎉 Successfully extracted {summary['total_posts']} posts!")
-                print(f"📊 Post Summary:")
-                print(f"   • Total posts: {summary['total_posts']}")
-                if summary.get('post_types'):
-                    print(f"   • Post types: {dict(summary['post_types'])}")
-                if summary.get('unique_hashtags'):
-                    print(f"   • Unique hashtags: {summary['unique_hashtags']}")
-                if summary.get('unique_authors'):
-                    print(f"   • Authors: {summary['unique_authors']}")
-                
-                # Step 7: Generate Markdown file
-                logger.info("Generating Markdown file...")
-                print("📄 Creating Markdown file...")
-                
                 try:
-                    # Extract profile name from URL for markdown generation
-                    profile_name = normalized_url.split('/')[-1] or normalized_url.split('/')[-2]
-                    if not profile_name:
-                        profile_name = "linkedin-profile"
+                    page_source = driver_manager.driver.page_source
+                    if not page_source:
+                        logger.error("Failed to get page source")
+                        print("❌ Failed to get page content")
+                        return 1
+                        
+                    logger.info("Parsing LinkedIn posts...")
+                    print("📝 Extracting posts...")
                     
-                    # Generate markdown file
-                    output_file = generate_markdown_from_posts(
-                        posts=posts,
-                        profile_name=profile_name,
-                        profile_url=normalized_url,
-                        output_dir=args.output,
-                        filename=args.filename
-                    )
+                    # Use the correct function to parse the profile
+                    posts = parse_linkedin_profile(page_source)
                     
-                    logger.info(f"Markdown file generated: {output_file}")
-                    print(f"✅ Markdown file created: {output_file}")
-                    
-                except Exception as e:
-                    logger.error(f"Failed to generate Markdown file: {e}", exc_info=True)
-                    print(f"❌ Failed to create Markdown file: {e}")
+                except Exception as parse_error:
+                    logger.error(f"Failed to extract page content: {parse_error}")
+                    print(f"❌ Failed to extract page content: {parse_error}")
                     return 1
+
+            if not posts:
+                logger.warning("No posts found on the profile")
+                print("⚠️  No posts found on this LinkedIn profile")
+                print("   This could be due to:")
+                print("   • The profile has no public posts")
+                print("   • The profile requires login to view posts")
+                print("   • LinkedIn's structure has changed")
+                return 0
+            
+            # Step 6: Generate summary
+            summary = extract_post_summary(posts)
+            logger.info(f"Extracted {summary['total_posts']} posts")
+            
+            # Display results
+            print(f"\n🎉 Successfully extracted {summary['total_posts']} posts!")
+            print(f"📊 Post Summary:")
+            print(f"   • Total posts: {summary['total_posts']}")
+            if summary.get('post_types'):
+                print(f"   • Post types: {dict(summary['post_types'])}")
+            if summary.get('unique_hashtags'):
+                print(f"   • Unique hashtags: {summary['unique_hashtags']}")
+            if summary.get('unique_authors'):
+                print(f"   • Authors: {summary['unique_authors']}")
+            
+            # Step 7: Generate Markdown file
+            logger.info("Generating Markdown file...")
+            print("📄 Creating Markdown file...")
+            
+            try:
+                # Extract profile name from URL for markdown generation
+                profile_name = normalized_url.split('/')[-1] or normalized_url.split('/')[-2]
+                if not profile_name:
+                    profile_name = "linkedin-profile"
                 
+                # Generate markdown file
+                output_file = generate_markdown_from_posts(
+                    posts=posts,
+                    profile_name=profile_name,
+                    profile_url=normalized_url,
+                    output_dir=args.output,
+                    filename=args.filename
+                )
+                
+                logger.info(f"Markdown file generated: {output_file}")
+                print(f"✅ Markdown file created: {output_file}")
+                
+            except Exception as e:
+                logger.error(f"Failed to generate Markdown file: {e}", exc_info=True)
+                print(f"❌ Failed to create Markdown file: {e}")
+                return 1
+            
         except Exception as e:
             logger.error(f"Web automation error: {e}", exc_info=True)
             print(f"❌ Web automation error: {e}")
