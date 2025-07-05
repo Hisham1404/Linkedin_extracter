@@ -2,8 +2,8 @@
   "session_info": {
     "session_id": null,
     "recovery_mode": false,
-    "start_time": "2025-07-05T06:15:38.828054+00:00",
-    "elapsed_time": "0:00:00.043481",
+    "start_time": "2025-07-05T07:19:16.772171+00:00",
+    "elapsed_time": "0:00:00",
     "estimated_completion": null
   },
   "progress": {
@@ -14,11 +14,11 @@
     "total_phases": 10
   },
   "extraction": {
-    "posts_extracted": 15,
+    "posts_extracted": 0,
     "posts_estimate": null,
-    "extraction_rate": 22838.14,
-    "extraction_rate_per_second": 380.636,
-    "smoothed_extraction_rate": 36499.2,
+    "extraction_rate": 0.0,
+    "extraction_rate_per_second": 0.0,
+    "smoothed_extraction_rate": 0.0,
     "scroll_position": 0,
     "scroll_target": null
   },
@@ -44,23 +44,23 @@
   },
   "rate_summary": {
     "extraction_rates": {
-      "per_second": 380.636,
-      "per_minute": 22838.14,
-      "smoothed_per_minute": 36499.2
+      "per_second": 0.0,
+      "per_minute": 0.0,
+      "smoothed_per_minute": 0.0
     },
     "phase_rates": {
       "current_phase": 0.0,
       "average_across_phases": 0.0
     },
     "rate_calculators": {
-      "posts_measurements": 4,
-      "bytes_measurements": 4,
-      "overall_measurements": 4
+      "posts_measurements": 0,
+      "bytes_measurements": 0,
+      "overall_measurements": 0
     }
   },
   "timing_summary": {
     "overall_timing": {
-      "elapsed": "0:00:00.043481",
+      "elapsed": "0:00:00",
       "estimated_remaining": null,
       "estimated_completion": null
     },

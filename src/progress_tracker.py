@@ -18,6 +18,7 @@ import json
 import logging
 from collections import deque
 import statistics
+import uuid
 
 try:
     from tqdm import tqdm
@@ -47,6 +48,83 @@ class ProgressPhase(Enum):
     DATA_PROCESSING = "data_processing"
     MARKDOWN_GENERATION = "markdown_generation"
     COMPLETION = "completion"
+
+
+class StatusCategory(Enum):
+    """Categories for status updates."""
+    INFO = "info"
+    SUCCESS = "success"
+    WARNING = "warning"
+    ERROR = "error"
+    PROGRESS = "progress"
+    MILESTONE = "milestone"
+
+
+class CallbackTrigger(Enum):
+    """Triggers for status callbacks."""
+    PHASE_START = "phase_start"
+    PHASE_PROGRESS = "phase_progress"
+    PHASE_COMPLETE = "phase_complete"
+    EXTRACTION_UPDATE = "extraction_update"
+    ERROR_OCCURRED = "error_occurred"
+    MILESTONE_REACHED = "milestone_reached"
+    STATUS_UPDATE = "status_update"
+    ALL = "all"  # Receives all status updates
+
+
+@dataclass
+class StatusUpdate:
+    """Represents a status update with details."""
+    id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    timestamp: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
+    phase: ProgressPhase = ProgressPhase.INITIALIZATION
+    category: StatusCategory = StatusCategory.INFO
+    trigger: CallbackTrigger = CallbackTrigger.STATUS_UPDATE
+    message: str = ""
+    details: Dict[str, Any] = field(default_factory=dict)
+    progress_data: Optional['ProgressStats'] = None
+
+
+@dataclass
+class CallbackRegistration:
+    """Registration for status update callbacks."""
+    callback: Callable[[StatusUpdate], None]
+    callback_id: str = field(default_factory=lambda: str(uuid.uuid4())[:8])
+    triggers: List[CallbackTrigger] = field(default_factory=list)
+    phases: List[ProgressPhase] = field(default_factory=list)
+    categories: List[StatusCategory] = field(default_factory=list)
+    frequency: float = 0.5  # minimum seconds between calls
+    last_called: float = field(default_factory=time.time)
+    active: bool = True
+    
+    def should_trigger(self, status_update: StatusUpdate) -> bool:
+        """Check if this callback should be triggered for the given status update."""
+        if not self.active:
+            return False
+        
+        # Check frequency throttling
+        if (time.time() - self.last_called) < self.frequency:
+            return False
+        
+        # Check if any trigger matches
+        if CallbackTrigger.ALL in self.triggers or status_update.trigger in self.triggers:
+            trigger_match = True
+        else:
+            trigger_match = False
+        
+        # Check if phase matches (if specified)
+        if self.phases and status_update.phase not in self.phases:
+            phase_match = False
+        else:
+            phase_match = True
+        
+        # Check if category matches (if specified)
+        if self.categories and status_update.category not in self.categories:
+            category_match = False
+        else:
+            category_match = True
+        
+        return trigger_match and phase_match and category_match
 
 
 @dataclass
@@ -259,6 +337,17 @@ class ProgressTracker:
         self.last_bytes_count = 0
         self.last_update_time = datetime.now(timezone.utc)
         
+        # Enhanced status update and callback system
+        self.callback_registrations: Dict[str, CallbackRegistration] = {}
+        self.status_history: List[StatusUpdate] = []
+        self.status_history_max_size = 100
+        self.milestones: Dict[str, bool] = {
+            "first_post_extracted": False,
+            "halfway_complete": False,
+            "scroll_complete": False,
+            "extraction_complete": False
+        }
+        
         # Progress bars
         self.overall_pbar: Optional[Any] = None
         self.phase_pbar: Optional[Any] = None
@@ -272,7 +361,7 @@ class ProgressTracker:
         self.session_id: Optional[str] = None
         self.recovery_mode: bool = False
         
-        logger.info("Progress tracker initialized with enhanced rate calculations")
+        logger.info("Progress tracker initialized with enhanced status update and callback system")
     
     def _get_phase_weights(self) -> Dict[ProgressPhase, float]:
         """Get relative weights for each phase (sums to 100%)."""
@@ -373,6 +462,8 @@ class ProgressTracker:
                     prev_timing.items_processed = self.stats.phase_items_completed
                     if prev_timing.end_time is None:  # Only complete if not already completed
                         prev_timing.complete()
+                        # Notify phase completion
+                        self.notify_phase_complete(self.stats.current_phase, prev_timing.duration)
             
             # Start new phase
             self.stats.current_phase = phase
@@ -397,6 +488,9 @@ class ProgressTracker:
                 self.phase_pbar.set_description(desc)
                 self.phase_pbar.reset()
         
+        # Notify phase start
+        self.notify_phase_start(phase, description)
+        
         if self.enable_logging:
             logger.info(f"Started phase: {phase.value} (items: {total_items})")
     
@@ -413,6 +507,8 @@ class ProgressTracker:
             increment: Number of items to increment by
         """
         with self._stats_lock:
+            old_percentage = self.stats.phase_percentage
+            
             if items_completed is not None:
                 self.stats.phase_items_completed = items_completed
             elif increment > 0:
@@ -427,6 +523,15 @@ class ProgressTracker:
             
             # Update overall progress
             self._update_overall_progress()
+            
+            # Notify progress if significant change
+            if abs(self.stats.phase_percentage - old_percentage) >= 5:  # 5% threshold
+                self.notify_phase_progress(
+                    self.stats.current_phase,
+                    self.stats.phase_percentage,
+                    self.stats.phase_items_completed,
+                    self.stats.phase_items_total
+                )
     
     def update_extraction_stats(self,
                               posts_extracted: Optional[int] = None,
@@ -446,6 +551,7 @@ class ProgressTracker:
         """
         with self._stats_lock:
             current_time = datetime.now(timezone.utc)
+            old_posts_count = self.stats.posts_extracted
             
             # Update basic stats
             if posts_extracted is not None:
@@ -477,6 +583,14 @@ class ProgressTracker:
             
             # Update timing for current phase
             self._update_phase_timing()
+            
+            # Notify extraction update if posts count changed significantly
+            if posts_extracted is not None and abs(posts_extracted - old_posts_count) >= 1:
+                self.notify_extraction_update(
+                    posts_extracted,
+                    posts_estimate,
+                    self.stats.extraction_rate
+                )
     
     def increment_error_count(self, error_type: str = "error") -> None:
         """
@@ -492,7 +606,7 @@ class ProgressTracker:
                 self.stats.warning_count += 1
             elif error_type == "retry":
                 self.stats.retry_count += 1
-    
+
     def complete_phase(self, phase: Optional[ProgressPhase] = None) -> None:
         """
         Mark a phase as completed.
@@ -518,7 +632,7 @@ class ProgressTracker:
             
             self._complete_current_phase()
             self._update_overall_progress()
-    
+
     def add_callback(self, 
                     callback: Callable[[ProgressStats], None],
                     frequency: float = 1.0) -> None:
@@ -531,7 +645,7 @@ class ProgressTracker:
         """
         self.callbacks.append(ProgressCallback(callback, frequency))
         logger.debug(f"Added progress callback with frequency {frequency}s")
-    
+
     def get_stats(self) -> ProgressStats:
         """Get current progress statistics."""
         with self._stats_lock:
@@ -545,7 +659,7 @@ class ProgressTracker:
                 self.stats.phase_elapsed_time = current_time - timing.start_time
             
             return self.stats
-    
+
     def get_summary_report(self) -> Dict[str, Any]:
         """Get a comprehensive progress summary report."""
         stats = self.get_stats()
@@ -584,80 +698,67 @@ class ProgressTracker:
             "time_estimates": {
                 "estimated_remaining": str(stats.estimated_remaining) if stats.estimated_remaining else None,
                 "estimated_completion": stats.estimated_completion.isoformat() if stats.estimated_completion else None,
-                "conservative_remaining": str(stats.estimated_remaining_conservative) if stats.estimated_remaining_conservative else None,
-                "optimistic_remaining": str(stats.estimated_remaining_optimistic) if stats.estimated_remaining_optimistic else None
-            },
-            "phase_metrics": {
-                "current_phase_rate": round(stats.current_phase_rate, 3),
-                "average_phase_rate": round(stats.average_phase_rate, 3),
-                "phase_elapsed_time": str(stats.phase_elapsed_time),
+                "estimated_remaining_conservative": str(stats.estimated_remaining_conservative) if stats.estimated_remaining_conservative else None,
+                "estimated_remaining_optimistic": str(stats.estimated_remaining_optimistic) if stats.estimated_remaining_optimistic else None,
                 "phase_estimated_remaining": str(stats.phase_estimated_remaining) if stats.phase_estimated_remaining else None,
                 "average_phase_duration": str(stats.average_phase_duration) if stats.average_phase_duration else None
             },
-            "rate_summary": self.get_rate_summary(),
-            "timing_summary": self.get_timing_summary()
+            "rate_metrics": {
+                "current_phase_rate": round(stats.current_phase_rate, 3),
+                "average_phase_rate": round(stats.average_phase_rate, 3)
+            }
         }
-    
+
     def _complete_current_phase(self) -> None:
-        """Mark current phase as completed and increment counter."""
-        phase_index = list(ProgressPhase).index(self.stats.current_phase)
-        if phase_index >= self.stats.completed_phases:
-            self.stats.completed_phases = phase_index + 1
-    
+        """Complete the current phase and update phase count."""
+        self.stats.completed_phases += 1
+
     def _update_overall_progress(self) -> None:
-        """Update overall progress percentage based on phase weights."""
+        """Update overall progress based on phase weights and current progress."""
+        if not self.phase_weights:
+            return
+        
         total_progress = 0.0
+        completed_weight = 0.0
         
-        # Add completed phases
-        for i, phase in enumerate(ProgressPhase):
-            if i < self.stats.completed_phases:
-                total_progress += self.phase_weights[phase]
+        # Add weight for completed phases
+        for phase in ProgressPhase:
+            if phase == self.stats.current_phase:
+                # Add partial progress for current phase
+                phase_weight = self.phase_weights.get(phase, 0.0)
+                phase_contribution = (self.stats.phase_percentage / 100.0) * phase_weight
+                total_progress += phase_contribution
+                break
+            else:
+                # Add full weight for completed phases
+                phase_weight = self.phase_weights.get(phase, 0.0)
+                if self.stats.completed_phases > list(ProgressPhase).index(phase):
+                    completed_weight += phase_weight
         
-        # Add current phase progress
-        if self.stats.completed_phases < len(ProgressPhase):
-            current_phase_list = list(ProgressPhase)
-            if self.stats.completed_phases < len(current_phase_list):
-                current_phase = current_phase_list[self.stats.completed_phases]
-                phase_weight = self.phase_weights[current_phase]
-                total_progress += (self.stats.phase_percentage / 100.0) * phase_weight
-        
+        total_progress += completed_weight
         self.stats.overall_percentage = min(100.0, total_progress)
-    
-    def _update_time_estimates(self) -> None:
-        """Update time estimates based on current progress."""
-        if self.stats.overall_percentage > 0:
-            elapsed = self._get_elapsed_time()
-            if elapsed.total_seconds() > 0:
-                rate = self.stats.overall_percentage / elapsed.total_seconds()
-                remaining_percentage = 100.0 - self.stats.overall_percentage
-                
-                if rate > 0:
-                    remaining_seconds = remaining_percentage / rate
-                    self.stats.estimated_remaining = timedelta(seconds=remaining_seconds)
-                    self.stats.estimated_completion = datetime.now(timezone.utc) + self.stats.estimated_remaining
-    
+
     def _update_advanced_rates(self) -> None:
-        """Update advanced rate calculations using moving averages."""
-        current_time = datetime.now(timezone.utc)
+        """Update advanced rate calculations."""
+        # Update extraction rates
+        current_rate_per_second = self.posts_rate_calculator.get_current_rate()
+        self.stats.extraction_rate_per_second = current_rate_per_second
+        self.stats.extraction_rate = current_rate_per_second * 60.0  # convert to per minute
+        self.stats.smoothed_extraction_rate = self.posts_rate_calculator.get_smoothed_rate() * 60.0
         
-        # Calculate extraction rates
-        self.stats.extraction_rate_per_second = self.posts_rate_calculator.get_average_rate()
-        self.stats.extraction_rate = self.stats.extraction_rate_per_second * 60  # per minute
-        self.stats.smoothed_extraction_rate = self.posts_rate_calculator.get_smoothed_rate() * 60
-        
-        # Calculate current phase rate
+        # Update current phase rate
         if self.stats.current_phase in self.phase_timings:
             timing = self.phase_timings[self.stats.current_phase]
-            phase_elapsed = (current_time - timing.start_time).total_seconds()
-            if phase_elapsed > 0 and timing.items_processed > 0:
-                self.stats.current_phase_rate = timing.items_processed / phase_elapsed
+            elapsed = datetime.now(timezone.utc) - timing.start_time
+            if elapsed.total_seconds() > 0 and timing.items_processed > 0:
+                self.stats.current_phase_rate = timing.items_processed / elapsed.total_seconds()
         
-        # Calculate average phase rate from history
+        # Update average phase rate
         if self.phase_history:
             total_rate = sum(timing.processing_rate for timing in self.phase_history if timing.processing_rate > 0)
             count = len([timing for timing in self.phase_history if timing.processing_rate > 0])
             self.stats.average_phase_rate = total_rate / count if count > 0 else 0.0
-    
+
     def _update_enhanced_time_estimates(self) -> None:
         """Update enhanced time estimates with conservative and optimistic scenarios."""
         if self.stats.overall_percentage > 0:
@@ -686,7 +787,7 @@ class ProgressTracker:
                 
                 # Phase-based estimates
                 self._update_phase_based_estimates()
-    
+
     def _update_phase_based_estimates(self) -> None:
         """Update estimates based on phase-specific historical data."""
         if not self.phase_history:
@@ -714,44 +815,13 @@ class ProgressTracker:
                     phase_estimate += current_phase_remaining
             
             self.stats.phase_estimated_remaining = phase_estimate
-    
+
     def _update_phase_timing(self) -> None:
-        """Update timing statistics for the current phase."""
-        if self.stats.current_phase not in self.phase_timings:
-            return
-        
-        timing = self.phase_timings[self.stats.current_phase]
-        current_time = datetime.now(timezone.utc)
-        
-        # Update phase elapsed time
-        self.stats.phase_elapsed_time = current_time - timing.start_time
-        
-        # Update phase items processed
-        timing.items_processed = self.stats.phase_items_completed
-        
-        # Calculate phase processing rate
-        if self.stats.phase_elapsed_time.total_seconds() > 0 and timing.items_processed > 0:
-            timing.processing_rate = timing.items_processed / self.stats.phase_elapsed_time.total_seconds()
-    
-    def get_rate_summary(self) -> Dict[str, Any]:
-        """Get a comprehensive summary of all rate calculations."""
-        return {
-            "extraction_rates": {
-                "per_second": round(self.stats.extraction_rate_per_second, 3),
-                "per_minute": round(self.stats.extraction_rate, 2),
-                "smoothed_per_minute": round(self.stats.smoothed_extraction_rate, 2)
-            },
-            "phase_rates": {
-                "current_phase": round(self.stats.current_phase_rate, 3),
-                "average_across_phases": round(self.stats.average_phase_rate, 3)
-            },
-            "rate_calculators": {
-                "posts_measurements": len(self.posts_rate_calculator.measurements),
-                "bytes_measurements": len(self.bytes_rate_calculator.measurements),
-                "overall_measurements": len(self.overall_rate_calculator.measurements)
-            }
-        }
-    
+        """Update timing for the current phase."""
+        if self.stats.current_phase in self.phase_timings:
+            timing = self.phase_timings[self.stats.current_phase]
+            timing.items_processed = self.stats.phase_items_completed
+
     def get_timing_summary(self) -> Dict[str, Any]:
         """Get a comprehensive summary of timing metrics."""
         return {
@@ -779,11 +849,11 @@ class ProgressTracker:
                 for timing in self.phase_history
             ]
         }
-    
+
     def _get_elapsed_time(self) -> timedelta:
         """Get elapsed time since tracking started."""
         return datetime.now(timezone.utc) - self.stats.start_time
-    
+
     def _update_loop(self) -> None:
         """Background update loop for progress indicators and callbacks."""
         while not self._stop_updates.wait(self.update_interval):
@@ -806,7 +876,7 @@ class ProgressTracker:
                 
             except Exception as e:
                 logger.error(f"Error in progress update loop: {e}")
-    
+
     def _save_stats(self) -> None:
         """Save progress statistics to file."""
         try:
@@ -819,6 +889,212 @@ class ProgressTracker:
         except Exception as e:
             logger.error(f"Failed to save progress stats: {e}")
 
+    def notify_phase_start(self, phase: ProgressPhase, description: Optional[str] = None) -> None:
+        """
+        Notify callbacks of phase start.
+        
+        Args:
+            phase: Phase that is starting
+            description: Optional description
+        """
+        message = f"Started phase: {phase.value.replace('_', ' ').title()}"
+        if description:
+            message += f" - {description}"
+        
+        self.broadcast_status_update(
+            message=message,
+            category=StatusCategory.PROGRESS,
+            trigger=CallbackTrigger.PHASE_START,
+            details={"phase": phase.value, "description": description}
+        )
+
+    def notify_phase_progress(self, 
+                            phase: ProgressPhase, 
+                            progress: float,
+                            items_completed: Optional[int] = None,
+                            items_total: Optional[int] = None) -> None:
+        """
+        Notify callbacks of phase progress.
+        
+        Args:
+            phase: Current phase
+            progress: Progress percentage (0-100)
+            items_completed: Items completed in phase
+            items_total: Total items in phase
+        """
+        message = f"Phase {phase.value.replace('_', ' ').title()}: {progress:.1f}%"
+        if items_completed is not None and items_total is not None:
+            message += f" ({items_completed}/{items_total} items)"
+        
+        self.broadcast_status_update(
+            message=message,
+            category=StatusCategory.PROGRESS,
+            trigger=CallbackTrigger.PHASE_PROGRESS,
+            details={
+                "phase": phase.value,
+                "progress": progress,
+                "items_completed": items_completed,
+                "items_total": items_total
+            }
+        )
+
+    def notify_phase_complete(self, phase: ProgressPhase, duration: Optional[timedelta] = None) -> None:
+        """
+        Notify callbacks of phase completion.
+        
+        Args:
+            phase: Phase that completed
+            duration: Phase duration
+        """
+        message = f"Completed phase: {phase.value.replace('_', ' ').title()}"
+        if duration:
+            message += f" (took {duration})"
+        
+        self.broadcast_status_update(
+            message=message,
+            category=StatusCategory.SUCCESS,
+            trigger=CallbackTrigger.PHASE_COMPLETE,
+            details={"phase": phase.value, "duration": str(duration) if duration else None}
+        )
+
+    def notify_extraction_update(self, 
+                               posts_extracted: int,
+                               posts_estimate: Optional[int] = None,
+                               rate: Optional[float] = None) -> None:
+        """
+        Notify callbacks of extraction progress.
+        
+        Args:
+            posts_extracted: Number of posts extracted
+            posts_estimate: Estimated total posts
+            rate: Current extraction rate
+        """
+        message = f"Extracted {posts_extracted} posts"
+        if posts_estimate:
+            percentage = (posts_extracted / posts_estimate) * 100
+            message += f" of ~{posts_estimate} ({percentage:.1f}%)"
+        if rate:
+            message += f" at {rate:.1f} posts/min"
+        
+        self.broadcast_status_update(
+            message=message,
+            category=StatusCategory.PROGRESS,
+            trigger=CallbackTrigger.EXTRACTION_UPDATE,
+            details={
+                "posts_extracted": posts_extracted,
+                "posts_estimate": posts_estimate,
+                "rate": rate
+            }
+        )
+
+    # Enhanced phase management with callback integration
+    def manage_phase(self, phase: ProgressPhase, total_items: Optional[int] = None, description: Optional[str] = None) -> None:
+        """
+        Manage phase progression with enhanced notifications and callback integration.
+        
+        Args:
+            phase: The phase to manage
+            total_items: Total items in this phase (for phase progress)
+            description: Custom description for the phase
+        """
+        with self._stats_lock:
+            # Check if phase is already current
+            if self.stats.current_phase == phase:
+                logger.debug(f"Phase {phase.value} is already current")
+                return
+            
+            # Complete previous phase if needed
+            if self.stats.current_phase != ProgressPhase.COMPLETION:
+                self.complete_phase()
+            
+            # Start new phase
+            self.start_phase(phase, total_items, description)
+            
+            # Notify phase start
+            self.notify_phase_start(phase, description)
+
+    def broadcast_status_update(self, message: str, category: StatusCategory, trigger: CallbackTrigger, details: Optional[Dict[str, Any]] = None) -> None:
+        """
+        Broadcast a status update to all registered callbacks.
+        
+        Args:
+            message: Status message
+            category: Status category
+            trigger: Trigger type
+            details: Optional additional details
+        """
+        timestamp = datetime.now(timezone.utc)
+        status_update = StatusUpdate(
+            timestamp=timestamp,
+            phase=self.stats.current_phase,
+            category=category,
+            trigger=trigger,
+            message=message,
+            details=details or {}
+        )
+        
+        # Add to status history
+        with self._stats_lock:
+            self.status_history.append(status_update)
+            if len(self.status_history) > self.status_history_max_size:
+                self.status_history.pop(0)
+        
+        # Check milestones
+        self.check_and_notify_milestones()
+        
+        # Trigger matching callbacks
+        for callback_id, registration in self.callback_registrations.items():
+            if registration.should_trigger(status_update):
+                try:
+                    registration.callback(status_update)
+                    registration.last_called = time.time()
+                    logger.debug(f"Triggered callback {callback_id}")
+                except Exception as e:
+                    logger.error(f"Error in callback {callback_id}: {e}")
+
+    def check_and_notify_milestones(self) -> None:
+        """Check and notify milestone achievements."""
+        with self._stats_lock:
+            # Milestone: First post extracted
+            if not self.milestones["first_post_extracted"] and self.stats.posts_extracted > 0:
+                self.milestones["first_post_extracted"] = True
+                self.broadcast_status_update(
+                    message="Milestone reached: First post extracted!",
+                    category=StatusCategory.MILESTONE,
+                    trigger=CallbackTrigger.MILESTONE_REACHED,
+                    details={"milestone": "first_post_extracted"}
+                )
+            
+            # Milestone: Halfway complete
+            if not self.milestones["halfway_complete"] and self.stats.completed_phases >= (self.stats.total_phases / 2):
+                self.milestones["halfway_complete"] = True
+                self.broadcast_status_update(
+                    message="Milestone reached: Halfway to completion!",
+                    category=StatusCategory.MILESTONE,
+                    trigger=CallbackTrigger.MILESTONE_REACHED,
+                    details={"milestone": "halfway_complete"}
+                )
+            
+            # Milestone: Scroll complete (if applicable)
+            if not self.milestones["scroll_complete"] and self.stats.scroll_target is not None:
+                if self.stats.scroll_position >= self.stats.scroll_target:
+                    self.milestones["scroll_complete"] = True
+                    self.broadcast_status_update(
+                        message="Milestone reached: Scroll complete!",
+                        category=StatusCategory.MILESTONE,
+                        trigger=CallbackTrigger.MILESTONE_REACHED,
+                        details={"milestone": "scroll_complete"}
+                    )
+            
+            # Milestone: Extraction complete
+            if not self.milestones["extraction_complete"] and self.stats.completed_phases == self.stats.total_phases:
+                self.milestones["extraction_complete"] = True
+                self.broadcast_status_update(
+                    message="Milestone reached: Extraction complete!",
+                    category=StatusCategory.MILESTONE,
+                    trigger=CallbackTrigger.MILESTONE_REACHED,
+                    details={"milestone": "extraction_complete"}
+                )
 
 # Convenience functions
 def create_progress_tracker(enable_tqdm: bool = True,
@@ -899,6 +1175,10 @@ def create_console_callback() -> Callable[[ProgressStats], None]:
 # Export main classes and functions
 __all__ = [
     "ProgressPhase",
+    "StatusCategory",
+    "CallbackTrigger",
+    "StatusUpdate",
+    "CallbackRegistration",
     "ProgressStats", 
     "ProgressCallback",
     "ProgressTracker",
